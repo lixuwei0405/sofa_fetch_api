@@ -15,29 +15,13 @@ export default function CrawlerDashboard() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   
-  const isRunningRef = useRef(isRunning);
-  const tasksRef = useRef(tasks);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const concurrencyRef = useRef(concurrency);
-  const httpMethodRef = useRef(httpMethod);
-  const urlTemplateRef = useRef(urlTemplate);
+  const tasksRefForSync = useRef(tasks);
 
-  // Sync refs for async access
+  // Sync ref for safe async worker access
   useEffect(() => {
-    isRunningRef.current = isRunning;
-  }, [isRunning]);
-  useEffect(() => {
-    tasksRef.current = tasks;
+    tasksRefForSync.current = tasks;
   }, [tasks]);
-  useEffect(() => {
-    concurrencyRef.current = concurrency;
-  }, [concurrency]);
-  useEffect(() => {
-    httpMethodRef.current = httpMethod;
-  }, [httpMethod]);
-  useEffect(() => {
-    urlTemplateRef.current = urlTemplate;
-  }, [urlTemplate]);
 
   // Process Excel data into tasks
   useEffect(() => {
@@ -141,8 +125,153 @@ export default function CrawlerDashboard() {
 
   const getConstructedUrl = (id: string) => {
     // Robust, case-insensitive replacement for various placeholder patterns
-    return urlTemplateRef.current.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
+    return urlTemplate.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
   };
+
+  // Safe, state-driven batch execution runner
+  useEffect(() => {
+    if (!isRunning) return;
+
+    let cancelled = false;
+    
+    // Get the snapshot of tasks at the moment it was started
+    const initialTasks = tasksRefForSync.current;
+    
+    // Build the initial queue of indices to process
+    const pendingIndices: number[] = [];
+    initialTasks.forEach((t, i) => {
+      if (t.status === 'pending' || t.status === 'failed') {
+        pendingIndices.push(i);
+      }
+    });
+
+    if (pendingIndices.length === 0) {
+      setIsRunning(false);
+      return;
+    }
+
+    let activeCount = 0;
+    let index = 0;
+    const maxConcurrency = Math.max(1, concurrency);
+
+    const runNext = async () => {
+      if (cancelled) return;
+      if (index >= pendingIndices.length) {
+        if (activeCount === 0) {
+          setIsRunning(false);
+        }
+        return;
+      }
+
+      const taskIdx = pendingIndices[index++];
+      const initialTask = initialTasks[taskIdx];
+      if (!initialTask) {
+        runNext();
+        return;
+      }
+
+      activeCount++;
+
+      // Mark as running in UI
+      setTasks(prev => {
+        const next = [...prev];
+        if (next[taskIdx]) {
+          const currentAttempts = (next[taskIdx].attempts || 0) + 1;
+          next[taskIdx] = {
+            ...next[taskIdx],
+            status: 'running',
+            attempts: currentAttempts,
+            report: ''
+          };
+        }
+        return next;
+      });
+
+      const targetUrl = getConstructedUrl(initialTask.id);
+      const method = httpMethod;
+
+      let isSuccess = false;
+      let reportText = '';
+
+      try {
+        console.log(`[CrawlerBatch] Requesting index ${taskIdx} (ID: ${initialTask.id}): Url=${targetUrl}`);
+        const res = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetUrl, method })
+        });
+        const data = await res.json();
+
+        if (res.ok) {
+          if (data.message === 'success' || data.success === true || (data.message === undefined && data.error === undefined)) {
+            const hasErrors = Array.isArray(data.data?.errors) && data.data.errors.length > 0;
+            const teamFailed = data.data?.teamStats?.failed || 0;
+            const playerFailed = data.data?.playerStats?.failed || 0;
+
+            if (!hasErrors && teamFailed === 0 && playerFailed === 0) {
+              isSuccess = true;
+            }
+            reportText = data.data?.report || JSON.stringify(data.data || data, null, 2);
+          } else {
+            reportText = data.message || data.error || JSON.stringify(data, null, 2);
+          }
+        } else {
+          reportText = data.message || data.error || JSON.stringify(data, null, 2);
+        }
+      } catch (err: any) {
+        reportText = err.message || "Request failed";
+      }
+
+      if (cancelled) {
+        console.log(`[CrawlerBatch] Run cancelled before index ${taskIdx} finished.`);
+        return;
+      }
+
+      // Update state with result
+      setTasks(prev => {
+        const next = [...prev];
+        if (next[taskIdx]) {
+          const attempts = next[taskIdx].attempts || 1;
+          if (!isSuccess && attempts < 2) {
+            console.log(`[CrawlerBatch] Index ${taskIdx} failed, scheduling retry.`);
+            // Push back to end of pendingIndices so it can retry once!
+            pendingIndices.push(taskIdx);
+            next[taskIdx] = {
+              ...next[taskIdx],
+              status: 'failed',
+              report: `${reportText} (Retrying once...)`
+          };
+          } else {
+            console.log(`[CrawlerBatch] Index ${taskIdx} completed. Success: ${isSuccess}`);
+            next[taskIdx] = {
+              ...next[taskIdx],
+              status: isSuccess ? 'success' : 'failed',
+              report: reportText
+            };
+          }
+        }
+        return next;
+      });
+
+      activeCount--;
+      
+      // Spawn next
+      runNext();
+    };
+
+    // Start initial batch of workers
+    for (let i = 0; i < maxConcurrency; i++) {
+      runNext();
+    }
+
+    return () => {
+      cancelled = true;
+      // Reset any tasks that are left in 'running' status to 'pending'
+      setTasks(prev => 
+        prev.map(t => t.status === 'running' ? { ...t, status: 'pending' } : t)
+      );
+    };
+  }, [isRunning]);
 
   const toggleRunning = async () => {
     console.log("[CrawlerDashboard] toggleRunning triggered. isRunning:", isRunning);
@@ -153,211 +282,21 @@ export default function CrawlerDashboard() {
       return;
     }
 
-    try {
-      if (isRunning) {
-        console.log("[CrawlerDashboard] Stopping batch run...");
-        setIsRunning(false);
-        isRunningRef.current = false;
-        return;
-      }
-
+    if (isRunning) {
+      console.log("[CrawlerDashboard] Stopping batch run...");
+      setIsRunning(false);
+    } else {
+      console.log("[CrawlerDashboard] Initializing and starting batch run...");
+      // Reset states of non-success tasks back to 'pending' before starting
+      setTasks(prev => 
+        prev.map(t => {
+          if (t.status !== 'success') {
+            return { ...t, status: 'pending', attempts: 0, report: '' };
+          }
+          return t;
+        })
+      );
       setIsRunning(true);
-      isRunningRef.current = true;
-
-      // Use tasks directly from state to be 100% safe against stale refs on initialization!
-      const currentTasksList = tasks;
-      console.log("[CrawlerDashboard] Current tasks in state:", currentTasksList);
-
-      // Reset non-success and non-running tasks and attempts for a clean batch execution session
-      const initializedTasks = currentTasksList.map(t => {
-        if (t.status !== 'success' && t.status !== 'running') {
-          return { ...t, status: 'pending' as const, attempts: 0, report: '' };
-        }
-        return t;
-      });
-
-      console.log("[CrawlerDashboard] Initialized tasks for run:", initializedTasks);
-
-      setTasks(initializedTasks);
-      tasksRef.current = initializedTasks;
-
-      // Build the queue of indices to process
-      const queue: number[] = [];
-      initializedTasks.forEach((t, i) => {
-        if (t.status === 'pending') {
-          queue.push(i);
-        }
-      });
-
-      console.log("[CrawlerDashboard] Pending task queue indices:", queue);
-
-      if (queue.length === 0) {
-        console.log("[CrawlerDashboard] No pending tasks to run. Exiting.");
-        setIsRunning(false);
-        isRunningRef.current = false;
-        return;
-      }
-
-      // Index tracking within the concurrent queue
-      let queueIndex = 0;
-      const threadCount = Math.max(1, concurrency || 1);
-      console.log("[CrawlerDashboard] Starting workers with concurrency:", threadCount);
-
-      // Define the concurrent queue worker
-      const worker = async () => {
-        while (isRunningRef.current) {
-          if (queueIndex >= queue.length) {
-            break;
-          }
-          const taskIdx = queue[queueIndex++];
-          const task = tasksRef.current[taskIdx];
-          if (!task) continue;
-
-          // Increment attempts (original run = 1, retry = 2)
-          const currentAttempts = (task.attempts || 0) + 1;
-          console.log(`[CrawlerDashboard] Worker processing task index ${taskIdx} (ID: ${task.id}), attempt: ${currentAttempts}`);
-
-          // Optimistically set to running in state and ref
-          setTasks(prev => {
-            const next = [...prev];
-            if (next[taskIdx]) {
-              next[taskIdx] = { 
-                ...next[taskIdx], 
-                status: 'running', 
-                attempts: currentAttempts,
-                report: '' 
-              };
-            }
-            return next;
-          });
-
-          tasksRef.current = tasksRef.current.map((t, idx) => {
-            if (idx === taskIdx) {
-              return { ...t, status: 'running', attempts: currentAttempts, report: '' };
-            }
-            return t;
-          });
-
-          const targetUrl = getConstructedUrl(task.id);
-          const method = httpMethodRef.current;
-
-          let isSuccess = false;
-          let reportText = '';
-
-          try {
-            console.log(`[CrawlerDashboard] Worker fetching: Url=${targetUrl}, Method=${method}`);
-            const res = await fetch('/api/proxy', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ targetUrl, method })
-            });
-            
-            const data = await res.json();
-            console.log(`[CrawlerDashboard] Worker received response for task index ${taskIdx}:`, data);
-
-            if (res.ok) {
-              if (data.message === 'success' || data.success === true || (data.message === undefined && data.error === undefined)) {
-                const hasErrors = Array.isArray(data.data?.errors) && data.data.errors.length > 0;
-                const teamFailed = data.data?.teamStats?.failed || 0;
-                const playerFailed = data.data?.playerStats?.failed || 0;
-
-                if (!hasErrors && teamFailed === 0 && playerFailed === 0) {
-                  isSuccess = true;
-                }
-                reportText = data.data?.report || JSON.stringify(data.data || data, null, 2);
-              } else {
-                reportText = data.message || data.error || JSON.stringify(data, null, 2);
-              }
-            } else {
-              reportText = data.message || data.error || JSON.stringify(data, null, 2);
-            }
-          } catch (err: any) {
-            console.error(`[CrawlerDashboard] Worker request failed for index ${taskIdx}:`, err);
-            reportText = err.message || "Unknown request error";
-          }
-
-          // If stopped during the request, reset safely and abort
-          if (!isRunningRef.current) {
-            console.log(`[CrawlerDashboard] Worker stopped. Resetting task index ${taskIdx} to pending.`);
-            setTasks(prev => {
-              const next = [...prev];
-              if (next[taskIdx]) {
-                next[taskIdx] = { ...next[taskIdx], status: 'pending' };
-              }
-              return next;
-            });
-            break;
-          }
-
-          if (isSuccess) {
-            console.log(`[CrawlerDashboard] Task index ${taskIdx} success.`);
-            setTasks(prev => {
-              const next = [...prev];
-              if (next[taskIdx]) {
-                next[taskIdx] = { ...next[taskIdx], status: 'success', report: reportText };
-              }
-              return next;
-            });
-            tasksRef.current = tasksRef.current.map((t, idx) => {
-              if (idx === taskIdx) {
-                return { ...t, status: 'success', report: reportText };
-              }
-              return t;
-            });
-          } else {
-            console.log(`[CrawlerDashboard] Task index ${taskIdx} failed.`);
-            // If failure, check if we can retry exactly once
-            if (currentAttempts < 2) {
-              console.log(`[CrawlerDashboard] Task index ${taskIdx} retrying once.`);
-              setTasks(prev => {
-                const next = [...prev];
-                if (next[taskIdx]) {
-                  next[taskIdx] = { ...next[taskIdx], status: 'failed', report: `${reportText} (Retrying once...)` };
-                }
-                return next;
-              });
-              tasksRef.current = tasksRef.current.map((t, idx) => {
-                if (idx === taskIdx) {
-                  return { ...t, status: 'failed', report: `${reportText} (Retrying once...)` };
-                }
-                return t;
-              });
-              
-              // Push index back to the queue for a single retry
-              queue.push(taskIdx);
-            } else {
-              console.log(`[CrawlerDashboard] Task index ${taskIdx} final failure.`);
-              // Already retried once, mark as final failure
-              setTasks(prev => {
-                const next = [...prev];
-                if (next[taskIdx]) {
-                  next[taskIdx] = { ...next[taskIdx], status: 'failed', report: reportText };
-                }
-                return next;
-              });
-              tasksRef.current = tasksRef.current.map((t, idx) => {
-                if (idx === taskIdx) {
-                  return { ...t, status: 'failed', report: reportText };
-                }
-                return t;
-              });
-            }
-          }
-        }
-      };
-
-      // Spawn concurrent worker threads based on concurrency parameter
-      const workers = Array.from({ length: threadCount }, () => worker());
-      await Promise.all(workers);
-
-      console.log("[CrawlerDashboard] All workers finished.");
-      setIsRunning(false);
-      isRunningRef.current = false;
-    } catch (e: any) {
-      console.error("[CrawlerDashboard] toggleRunning general error:", e);
-      setIsRunning(false);
-      isRunningRef.current = false;
-      alert("Error starting batch run: " + e.message);
     }
   };
 
@@ -383,7 +322,7 @@ export default function CrawlerDashboard() {
     });
 
     const targetUrl = getConstructedUrl(task.id);
-    const method = httpMethodRef.current;
+    const method = httpMethod;
 
     try {
       const res = await fetch('/api/proxy', {
