@@ -1,0 +1,6 @@
+{
+  "name": "Data Crawler Tracker",
+  "description": "Batch API executor and tracker with Excel import for data compensation crawling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
