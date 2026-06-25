@@ -46,14 +46,17 @@ export default function CrawlerDashboard() {
       return;
     }
     
+    console.log("[CrawlerDashboard] Processing excelData, total rows:", excelData.length, "skipHeader:", skipHeader, "selectedColumnIndex:", selectedColumnIndex);
+    
     const newTasks: TaskRow[] = [];
     const startIndex = skipHeader ? 1 : 0;
     
     for (let i = startIndex; i < excelData.length; i++) {
       const row = excelData[i];
-      if (row && row.length > selectedColumnIndex) {
-        const idVal = row[selectedColumnIndex];
-        if (idVal !== undefined && idVal !== null && idVal !== '') {
+      if (row) {
+        // Safe access to the column index regardless of array sparsity or object layout
+        const idVal = Array.isArray(row) ? row[selectedColumnIndex] : (row as any)[selectedColumnIndex];
+        if (idVal !== undefined && idVal !== null && String(idVal).trim() !== '') {
           newTasks.push({
             id: String(idVal).trim(),
             originalIndex: i,
@@ -62,6 +65,8 @@ export default function CrawlerDashboard() {
         }
       }
     }
+    
+    console.log("[CrawlerDashboard] Successfully generated tasks count:", newTasks.length);
     setTasks(newTasks);
   }, [excelData, skipHeader, selectedColumnIndex]);
 
@@ -69,24 +74,55 @@ export default function CrawlerDashboard() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    console.log("[CrawlerDashboard] handleFileUpload triggered. Selected file:", file.name, "size:", file.size);
+
     const reader = new FileReader();
     reader.onload = (evt) => {
-      const bstr = evt.target?.result;
-      if (!bstr) return;
-      
-      const wb = XLSX.read(bstr, { type: 'binary' });
-      const wsname = wb.SheetNames[0];
-      const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1 });
-      
-      setExcelData(data);
-      // Reset input so the same file can be uploaded again if needed
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      try {
+        const buffer = evt.target?.result;
+        if (!buffer) {
+          console.error("[CrawlerDashboard] Empty file buffer received.");
+          alert("Selected file has no content.");
+          return;
+        }
+        
+        console.log("[CrawlerDashboard] File loaded in browser, parsing as ArrayBuffer...");
+        const arr = new Uint8Array(buffer as ArrayBuffer);
+        const wb = XLSX.read(arr, { type: 'array' });
+        
+        if (!wb.SheetNames || wb.SheetNames.length === 0) {
+          throw new Error("The Excel/CSV workbook does not contain any sheets.");
+        }
+
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const parsedData = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1 });
+        
+        console.log("[CrawlerDashboard] Successfully parsed Excel sheets. Rows parsed:", parsedData.length);
+        if (parsedData.length === 0) {
+          alert("The Excel/CSV sheet appears to be empty.");
+          return;
+        }
+
+        setExcelData(parsedData);
+      } catch (err: any) {
+        console.error("[CrawlerDashboard] Excel/CSV parsing failed:", err);
+        alert("Failed to read and parse Excel/CSV file: " + (err.message || String(err)));
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
     };
-    reader.readAsBinaryString(file);
+    
+    reader.onerror = (evt) => {
+      console.error("[CrawlerDashboard] FileReader error:", evt);
+      alert("File reading failed.");
+    };
+
+    reader.readAsArrayBuffer(file);
   };
 
   const clearData = () => {
+    console.log("[CrawlerDashboard] Clearing loaded excelData and tasks...");
     setExcelData([]);
     setTasks([]);
   };
@@ -514,28 +550,30 @@ export default function CrawlerDashboard() {
 
           <div className="mt-auto flex flex-col gap-3 pt-6">
             <button
+              type="button"
               onClick={toggleRunning}
               disabled={tasks.length === 0}
               className={cn(
-                "w-full font-bold py-3 rounded-xl transition-all shadow-lg text-sm flex items-center justify-center gap-2",
+                "w-full font-bold py-3 rounded-xl transition-all shadow-lg text-sm flex items-center justify-center gap-2 select-none",
                 isRunning ? "bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/20" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20",
                 tasks.length === 0 && "opacity-50 cursor-not-allowed bg-slate-800 hover:bg-slate-800 shadow-none text-slate-500"
               )}
             >
               {isRunning ? (
-                <><Pause className="w-4 h-4" /> Pause Execution</>
+                <><Pause className="w-4 h-4 pointer-events-none" /> <span className="pointer-events-none">Pause Execution</span></>
               ) : (
-                <><Play className="w-4 h-4" /> {stats.pending === tasks.length ? 'Execute Batch Process' : 'Resume Execution'}</>
+                <><Play className="w-4 h-4 pointer-events-none" /> <span className="pointer-events-none">{stats.pending === tasks.length ? 'Execute Batch Process' : 'Resume Execution'}</span></>
               )}
             </button>
             
             {tasks.length > 0 && !isRunning && (
               <button 
+                type="button"
                 onClick={clearData}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 font-bold py-3 rounded-xl transition-all text-sm flex items-center justify-center gap-2"
+                className="w-full bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 font-bold py-3 rounded-xl transition-all text-sm flex items-center justify-center gap-2 select-none"
               >
-                <Trash2 className="w-4 h-4" />
-                Clear Data
+                <Trash2 className="w-4 h-4 pointer-events-none" />
+                <span className="pointer-events-none">Clear Data</span>
               </button>
             )}
           </div>
