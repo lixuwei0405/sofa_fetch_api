@@ -3,4 +3,5 @@ export interface TaskRow {
   originalIndex: number;
   status: 'pending' | 'running' | 'success' | 'failed';
   report?: string;
+  attempts?: number;
 }

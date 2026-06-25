@@ -18,6 +18,9 @@ export default function CrawlerDashboard() {
   const isRunningRef = useRef(isRunning);
   const tasksRef = useRef(tasks);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const concurrencyRef = useRef(concurrency);
+  const httpMethodRef = useRef(httpMethod);
+  const urlTemplateRef = useRef(urlTemplate);
 
   // Sync refs for async access
   useEffect(() => {
@@ -26,6 +29,15 @@ export default function CrawlerDashboard() {
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+  useEffect(() => {
+    concurrencyRef.current = concurrency;
+  }, [concurrency]);
+  useEffect(() => {
+    httpMethodRef.current = httpMethod;
+  }, [httpMethod]);
+  useEffect(() => {
+    urlTemplateRef.current = urlTemplate;
+  }, [urlTemplate]);
 
   // Process Excel data into tasks
   useEffect(() => {
@@ -81,60 +93,7 @@ export default function CrawlerDashboard() {
 
   const getConstructedUrl = (id: string) => {
     // Robust, case-insensitive replacement for various placeholder patterns
-    return urlTemplate.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
-  };
-
-  const processSingleTask = async (taskIndex: number, taskId: string) => {
-    setTasks(prev => {
-      const next = [...prev];
-      if (next[taskIndex]) {
-        next[taskIndex] = { ...next[taskIndex], status: 'running', report: '' };
-      }
-      return next;
-    });
-
-    const targetUrl = getConstructedUrl(taskId);
-
-    try {
-      const res = await fetch('/api/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetUrl, method: httpMethod })
-      });
-      
-      const data = await res.json();
-      let isSuccess = false;
-      let reportText = '';
-
-      if (res.ok && data.message === 'success') {
-        const hasErrors = Array.isArray(data.data?.errors) && data.data.errors.length > 0;
-        const teamFailed = data.data?.teamStats?.failed || 0;
-        const playerFailed = data.data?.playerStats?.failed || 0;
-
-        if (!hasErrors && teamFailed === 0 && playerFailed === 0) {
-          isSuccess = true;
-        }
-        reportText = data.data?.report || JSON.stringify(data.data, null, 2);
-      } else {
-        reportText = data.message || data.error || JSON.stringify(data, null, 2);
-      }
-
-      setTasks(prev => {
-        const next = [...prev];
-        if (next[taskIndex]) {
-          next[taskIndex] = { ...next[taskIndex], status: isSuccess ? 'success' : 'failed', report: reportText };
-        }
-        return next;
-      });
-    } catch (err: any) {
-      setTasks(prev => {
-        const next = [...prev];
-        if (next[taskIndex]) {
-          next[taskIndex] = { ...next[taskIndex], status: 'failed', report: err.message };
-        }
-        return next;
-      });
-    }
+    return urlTemplateRef.current.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
   };
 
   const toggleRunning = async () => {
@@ -146,35 +105,247 @@ export default function CrawlerDashboard() {
 
     setIsRunning(true);
     isRunningRef.current = true;
-    
-    const allPendingOrFailed = tasksRef.current
-      .map((t, i) => ({ ...t, idx: i }))
-      .filter(t => t.status === 'pending' || t.status === 'failed');
 
-    let currentIndex = 0;
+    // Reset non-success tasks and attempts for a clean batch execution session
+    const initializedTasks = tasksRef.current.map(t => {
+      if (t.status !== 'success') {
+        return { ...t, status: 'pending' as const, attempts: 0, report: '' };
+      }
+      return t;
+    });
 
-    const workers = Array.from({ length: concurrency }, async () => {
-      while (currentIndex < allPendingOrFailed.length) {
-        if (!isRunningRef.current) break;
-        
-        const myIndex = currentIndex++;
-        if (myIndex >= allPendingOrFailed.length) break;
-        const taskObj = allPendingOrFailed[myIndex];
-        
-        await processSingleTask(taskObj.idx, taskObj.id);
+    setTasks(initializedTasks);
+    tasksRef.current = initializedTasks;
+
+    // Build the queue of indices to process
+    const queue: number[] = [];
+    initializedTasks.forEach((t, i) => {
+      if (t.status === 'pending') {
+        queue.push(i);
       }
     });
 
+    if (queue.length === 0) {
+      setIsRunning(false);
+      isRunningRef.current = false;
+      return;
+    }
+
+    // Index tracking within the concurrent queue
+    let queueIndex = 0;
+
+    // Define the concurrent queue worker
+    const worker = async () => {
+      while (isRunningRef.current) {
+        if (queueIndex >= queue.length) {
+          break;
+        }
+        const taskIdx = queue[queueIndex++];
+        
+        const task = tasksRef.current[taskIdx];
+        if (!task) continue;
+
+        // Increment attempts (original run = 1, retry = 2)
+        const currentAttempts = (task.attempts || 0) + 1;
+        
+        // Optimistically set to running in state and ref
+        setTasks(prev => {
+          const next = [...prev];
+          if (next[taskIdx]) {
+            next[taskIdx] = { 
+              ...next[taskIdx], 
+              status: 'running', 
+              attempts: currentAttempts,
+              report: '' 
+            };
+          }
+          return next;
+        });
+
+        tasksRef.current = tasksRef.current.map((t, idx) => {
+          if (idx === taskIdx) {
+            return { ...t, status: 'running', attempts: currentAttempts, report: '' };
+          }
+          return t;
+        });
+
+        const targetUrl = getConstructedUrl(task.id);
+        const method = httpMethodRef.current;
+
+        let isSuccess = false;
+        let reportText = '';
+
+        try {
+          const res = await fetch('/api/proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targetUrl, method })
+          });
+          
+          const data = await res.json();
+
+          if (res.ok) {
+            // Check specific success shape or generic JSON success
+            if (data.message === 'success' || data.success === true || (data.message === undefined && data.error === undefined)) {
+              const hasErrors = Array.isArray(data.data?.errors) && data.data.errors.length > 0;
+              const teamFailed = data.data?.teamStats?.failed || 0;
+              const playerFailed = data.data?.playerStats?.failed || 0;
+
+              if (!hasErrors && teamFailed === 0 && playerFailed === 0) {
+                isSuccess = true;
+              }
+              reportText = data.data?.report || JSON.stringify(data.data || data, null, 2);
+            } else {
+              reportText = data.message || data.error || JSON.stringify(data, null, 2);
+            }
+          } else {
+            reportText = data.message || data.error || JSON.stringify(data, null, 2);
+          }
+        } catch (err: any) {
+          reportText = err.message || "Unknown request error";
+        }
+
+        // If stopped during the request, reset safely and abort
+        if (!isRunningRef.current) {
+          setTasks(prev => {
+            const next = [...prev];
+            if (next[taskIdx]) {
+              next[taskIdx] = { ...next[taskIdx], status: 'pending' };
+            }
+            return next;
+          });
+          break;
+        }
+
+        if (isSuccess) {
+          setTasks(prev => {
+            const next = [...prev];
+            if (next[taskIdx]) {
+              next[taskIdx] = { ...next[taskIdx], status: 'success', report: reportText };
+            }
+            return next;
+          });
+          tasksRef.current = tasksRef.current.map((t, idx) => {
+            if (idx === taskIdx) {
+              return { ...t, status: 'success', report: reportText };
+            }
+            return t;
+          });
+        } else {
+          // If failure, check if we can retry exactly once
+          if (currentAttempts < 2) {
+            setTasks(prev => {
+              const next = [...prev];
+              if (next[taskIdx]) {
+                next[taskIdx] = { ...next[taskIdx], status: 'failed', report: `${reportText} (Retrying once...)` };
+              }
+              return next;
+            });
+            tasksRef.current = tasksRef.current.map((t, idx) => {
+              if (idx === taskIdx) {
+                return { ...t, status: 'failed', report: `${reportText} (Retrying once...)` };
+              }
+              return t;
+            });
+            
+            // Push index back to the queue for a single retry
+            queue.push(taskIdx);
+          } else {
+            // Already retried once, mark as final failure
+            setTasks(prev => {
+              const next = [...prev];
+              if (next[taskIdx]) {
+                next[taskIdx] = { ...next[taskIdx], status: 'failed', report: reportText };
+              }
+              return next;
+            });
+            tasksRef.current = tasksRef.current.map((t, idx) => {
+              if (idx === taskIdx) {
+                return { ...t, status: 'failed', report: reportText };
+              }
+              return t;
+            });
+          }
+        }
+      }
+    };
+
+    // Spawn concurrent worker threads based on concurrency parameter
+    const workers = Array.from({ length: concurrency }, () => worker());
     await Promise.all(workers);
+
     setIsRunning(false);
     isRunningRef.current = false;
   };
 
-  const handleManualRun = (idx: number) => {
+  const handleManualRun = async (idx: number) => {
     if (isRunning) return;
     const task = tasks[idx];
     if (!task || task.status === 'running') return;
-    processSingleTask(idx, task.id);
+
+    // Manual run starts clean or increments attempts
+    const currentAttempts = (task.attempts || 0) + 1;
+
+    setTasks(prev => {
+      const next = [...prev];
+      if (next[idx]) {
+        next[idx] = { 
+          ...next[idx], 
+          status: 'running', 
+          attempts: currentAttempts,
+          report: '' 
+        };
+      }
+      return next;
+    });
+
+    const targetUrl = getConstructedUrl(task.id);
+    const method = httpMethodRef.current;
+
+    try {
+      const res = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUrl, method })
+      });
+      
+      const data = await res.json();
+      let isSuccess = false;
+      let reportText = '';
+
+      if (res.ok) {
+        if (data.message === 'success' || data.success === true || (data.message === undefined && data.error === undefined)) {
+          const hasErrors = Array.isArray(data.data?.errors) && data.data.errors.length > 0;
+          const teamFailed = data.data?.teamStats?.failed || 0;
+          const playerFailed = data.data?.playerStats?.failed || 0;
+
+          if (!hasErrors && teamFailed === 0 && playerFailed === 0) {
+            isSuccess = true;
+          }
+          reportText = data.data?.report || JSON.stringify(data.data || data, null, 2);
+        } else {
+          reportText = data.message || data.error || JSON.stringify(data, null, 2);
+        }
+      } else {
+        reportText = data.message || data.error || JSON.stringify(data, null, 2);
+      }
+
+      setTasks(prev => {
+        const next = [...prev];
+        if (next[idx]) {
+          next[idx] = { ...next[idx], status: isSuccess ? 'success' : 'failed', report: reportText };
+        }
+        return next;
+      });
+    } catch (err: any) {
+      setTasks(prev => {
+        const next = [...prev];
+        if (next[idx]) {
+          next[idx] = { ...next[idx], status: 'failed', report: err.message };
+        }
+        return next;
+      });
+    }
   };
 
   const stats = {
@@ -448,12 +619,11 @@ export default function CrawlerDashboard() {
       {/* Footer Bar */}
       <footer className="shrink-0 flex items-center justify-between text-[11px] text-slate-500 border-t border-slate-800/50 pt-4">
         <div className="flex items-center gap-6">
-          <p>Active Thread Pool: <span className="text-indigo-400">0x0{concurrency}</span></p>
-          <p>Success Rate: <span className="text-emerald-500">{stats.total > 0 ? ((stats.success / stats.total) * 100).toFixed(2) : '0.00'}%</span></p>
+          <p>Threads: <span className="text-indigo-400 font-medium">{concurrency}</span></p>
+          <p>Success Rate: <span className="text-emerald-500 font-medium">{stats.total > 0 ? ((stats.success / stats.total) * 100).toFixed(2) : '0.00'}%</span></p>
         </div>
         <div className="flex gap-4">
-          <span className="px-2 py-0.5 bg-slate-800 rounded">System OK</span>
-          <span className="px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded">Auto-Analyze Enabled</span>
+          <span className="text-slate-600">CSV/Excel Crawler Automation</span>
         </div>
       </footer>
     </div>
