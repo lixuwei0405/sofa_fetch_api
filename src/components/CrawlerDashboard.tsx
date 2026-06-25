@@ -79,6 +79,11 @@ export default function CrawlerDashboard() {
     setTasks([]);
   };
 
+  const getConstructedUrl = (id: string) => {
+    // Robust, case-insensitive replacement for various placeholder patterns
+    return urlTemplate.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
+  };
+
   const processSingleTask = async (taskIndex: number) => {
     const task = tasksRef.current[taskIndex];
     if (!task) return;
@@ -89,7 +94,7 @@ export default function CrawlerDashboard() {
       return next;
     });
 
-    const targetUrl = urlTemplate.replace('{mpLeagueId}', task.id);
+    const targetUrl = getConstructedUrl(task.id);
 
     try {
       const res = await fetch('/api/proxy', {
@@ -392,7 +397,12 @@ export default function CrawlerDashboard() {
                       task.status === 'running' ? "bg-slate-800/40" : "opacity-70 hover:bg-slate-800/20"
                     )}>
                       <td className="p-3 text-slate-500">{task.originalIndex + 1}</td>
-                      <td className="p-3 text-indigo-400">{task.id}</td>
+                      <td className="p-3">
+                        <div className="text-indigo-400 font-bold">{task.id}</div>
+                        <div className="text-[9px] text-slate-500 truncate max-w-[220px]" title={getConstructedUrl(task.id)}>
+                          {getConstructedUrl(task.id)}
+                        </div>
+                      </td>
                       <td className="p-3">
                         {task.status === 'success' && <span className="bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded flex items-center w-fit gap-1"><CheckCircle2 className="w-3 h-3"/> SUCCESS</span>}
                         {task.status === 'failed' && <span className="bg-rose-500/10 text-rose-500 px-2 py-0.5 rounded flex items-center w-fit gap-1"><XCircle className="w-3 h-3"/> FAILED</span>}
