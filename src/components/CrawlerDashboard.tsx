@@ -6,7 +6,7 @@ import { TaskRow } from '../types';
 
 export default function CrawlerDashboard() {
   const [urlTemplate, setUrlTemplate] = useState('http://xxxx:xxxx/api-crawler/sofa/crawl/league/{mpLeagueId}');
-  const [httpMethod, setHttpMethod] = useState<'GET' | 'POST'>('POST');
+  const [httpMethod, setHttpMethod] = useState<'GET' | 'POST'>('GET');
   const [concurrency, setConcurrency] = useState<number>(1);
   const [skipHeader, setSkipHeader] = useState<boolean>(true);
   const [selectedColumnIndex, setSelectedColumnIndex] = useState<number>(0);
@@ -84,17 +84,16 @@ export default function CrawlerDashboard() {
     return urlTemplate.replace(/\{mpleagueid\}|\{id\}|\{leagueid\}/gi, id);
   };
 
-  const processSingleTask = async (taskIndex: number) => {
-    const task = tasksRef.current[taskIndex];
-    if (!task) return;
-
+  const processSingleTask = async (taskIndex: number, taskId: string) => {
     setTasks(prev => {
       const next = [...prev];
-      next[taskIndex] = { ...next[taskIndex], status: 'running', report: '' };
+      if (next[taskIndex]) {
+        next[taskIndex] = { ...next[taskIndex], status: 'running', report: '' };
+      }
       return next;
     });
 
-    const targetUrl = getConstructedUrl(task.id);
+    const targetUrl = getConstructedUrl(taskId);
 
     try {
       const res = await fetch('/api/proxy', {
@@ -122,13 +121,17 @@ export default function CrawlerDashboard() {
 
       setTasks(prev => {
         const next = [...prev];
-        next[taskIndex] = { ...next[taskIndex], status: isSuccess ? 'success' : 'failed', report: reportText };
+        if (next[taskIndex]) {
+          next[taskIndex] = { ...next[taskIndex], status: isSuccess ? 'success' : 'failed', report: reportText };
+        }
         return next;
       });
     } catch (err: any) {
       setTasks(prev => {
         const next = [...prev];
-        next[taskIndex] = { ...next[taskIndex], status: 'failed', report: err.message };
+        if (next[taskIndex]) {
+          next[taskIndex] = { ...next[taskIndex], status: 'failed', report: err.message };
+        }
         return next;
       });
     }
@@ -137,10 +140,13 @@ export default function CrawlerDashboard() {
   const toggleRunning = async () => {
     if (isRunning) {
       setIsRunning(false);
+      isRunningRef.current = false;
       return;
     }
 
     setIsRunning(true);
+    isRunningRef.current = true;
+    
     const allPendingOrFailed = tasksRef.current
       .map((t, i) => ({ ...t, idx: i }))
       .filter(t => t.status === 'pending' || t.status === 'failed');
@@ -152,19 +158,23 @@ export default function CrawlerDashboard() {
         if (!isRunningRef.current) break;
         
         const myIndex = currentIndex++;
-        const actualTaskIndex = allPendingOrFailed[myIndex].idx;
+        if (myIndex >= allPendingOrFailed.length) break;
+        const taskObj = allPendingOrFailed[myIndex];
         
-        await processSingleTask(actualTaskIndex);
+        await processSingleTask(taskObj.idx, taskObj.id);
       }
     });
 
     await Promise.all(workers);
     setIsRunning(false);
+    isRunningRef.current = false;
   };
 
   const handleManualRun = (idx: number) => {
     if (isRunning) return;
-    processSingleTask(idx);
+    const task = tasks[idx];
+    if (!task || task.status === 'running') return;
+    processSingleTask(idx, task.id);
   };
 
   const stats = {
@@ -306,15 +316,17 @@ export default function CrawlerDashboard() {
           <div className="mt-auto flex flex-col gap-3 pt-6">
             <button
               onClick={toggleRunning}
-              disabled={tasks.length === 0}
+              disabled={tasks.length === 0 || (!isRunning && stats.running > 0)}
               className={cn(
                 "w-full font-bold py-3 rounded-xl transition-all shadow-lg text-sm flex items-center justify-center gap-2",
                 isRunning ? "bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/20" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20",
-                tasks.length === 0 && "opacity-50 cursor-not-allowed bg-slate-800 hover:bg-slate-800 shadow-none text-slate-500"
+                (tasks.length === 0 || (!isRunning && stats.running > 0)) && "opacity-50 cursor-not-allowed bg-slate-800 hover:bg-slate-800 shadow-none text-slate-500"
               )}
             >
               {isRunning ? (
                 <><Pause className="w-4 h-4" /> Pause Execution</>
+              ) : stats.running > 0 ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> Single Run Active</>
               ) : (
                 <><Play className="w-4 h-4" /> {stats.pending === tasks.length ? 'Execute Batch Process' : 'Resume Execution'}</>
               )}
