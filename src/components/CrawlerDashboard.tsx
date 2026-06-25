@@ -77,6 +77,17 @@ export default function CrawlerDashboard() {
     console.log("[CrawlerDashboard] handleFileUpload triggered. Selected file:", file.name, "size:", file.size);
 
     const reader = new FileReader();
+    // Helper to extract the core XLSX library object in both ESM and CJS environments
+    const getXLSX = () => {
+      if (XLSX && typeof (XLSX as any).read === 'function') {
+        return XLSX;
+      }
+      if (XLSX && (XLSX as any).default && typeof (XLSX as any).default.read === 'function') {
+        return (XLSX as any).default;
+      }
+      return XLSX;
+    };
+
     reader.onload = (evt) => {
       try {
         const buffer = evt.target?.result;
@@ -88,7 +99,8 @@ export default function CrawlerDashboard() {
         
         console.log("[CrawlerDashboard] File loaded in browser, parsing as ArrayBuffer...");
         const arr = new Uint8Array(buffer as ArrayBuffer);
-        const wb = XLSX.read(arr, { type: 'array' });
+        const xlsxLib = getXLSX();
+        const wb = xlsxLib.read(arr, { type: 'array' });
         
         if (!wb.SheetNames || wb.SheetNames.length === 0) {
           throw new Error("The Excel/CSV workbook does not contain any sheets.");
@@ -96,7 +108,7 @@ export default function CrawlerDashboard() {
 
         const wsname = wb.SheetNames[0];
         const ws = wb.Sheets[wsname];
-        const parsedData = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1 });
+        const parsedData = xlsxLib.utils.sheet_to_json(ws, { header: 1 }) as any[];
         
         console.log("[CrawlerDashboard] Successfully parsed Excel sheets. Rows parsed:", parsedData.length);
         if (parsedData.length === 0) {
@@ -134,6 +146,13 @@ export default function CrawlerDashboard() {
 
   const toggleRunning = async () => {
     console.log("[CrawlerDashboard] toggleRunning triggered. isRunning:", isRunning);
+    
+    if (tasks.length === 0) {
+      console.warn("[CrawlerDashboard] Clicked toggleRunning, but tasks list is empty.");
+      alert("⚠️ Cannot start batch execution:\n\nPlease select and upload a valid Excel/CSV file with data rows first under '2. Data Source'.");
+      return;
+    }
+
     try {
       if (isRunning) {
         console.log("[CrawlerDashboard] Stopping batch run...");
@@ -552,11 +571,10 @@ export default function CrawlerDashboard() {
             <button
               type="button"
               onClick={toggleRunning}
-              disabled={tasks.length === 0}
               className={cn(
-                "w-full font-bold py-3 rounded-xl transition-all shadow-lg text-sm flex items-center justify-center gap-2 select-none",
+                "w-full font-bold py-3 rounded-xl transition-all shadow-lg text-sm flex items-center justify-center gap-2 select-none cursor-pointer",
                 isRunning ? "bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/20" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20",
-                tasks.length === 0 && "opacity-50 cursor-not-allowed bg-slate-800 hover:bg-slate-800 shadow-none text-slate-500"
+                tasks.length === 0 && "opacity-75 bg-slate-800 hover:bg-slate-700 text-slate-300 shadow-none hover:shadow-lg hover:shadow-slate-800/20"
               )}
             >
               {isRunning ? (
